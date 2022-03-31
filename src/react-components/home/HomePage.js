@@ -2,6 +2,7 @@ import React, { useContext, useEffect } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import classNames from "classnames";
 import configs from "../../utils/configs";
+import { getAppLogo } from "../../utils/get-app-logo";
 import { CreateRoomButton } from "./CreateRoomButton";
 import { PWAButton } from "./PWAButton";
 import { useFavoriteRooms } from "./useFavoriteRooms";
@@ -74,7 +75,11 @@ export function HomePage() {
             <SignInButton mobile />
           )}
           <div className={styles.logoContainer}>
-            {isHmc ? <HmcLogo /> : <img alt={configs.translation("app-name")} src={configs.image("logo")} />}
+            {isHmc ? (
+              <HmcLogo className="hmc-logo" />
+            ) : (
+              <img alt={configs.translation("app-name")} src={getAppLogo()} />
+            )}
           </div>
           <div className={styles.appInfo}>
             <div className={styles.appDescription}>{configs.translation("app-description")}</div>

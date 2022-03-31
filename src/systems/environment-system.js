@@ -1,31 +1,43 @@
 import { GUI } from "three/examples/jsm/libs/dat.gui.module.js";
 import qsTruthy from "../utils/qs_truthy";
 
-// This disabled lighting contribution from the environment map for things that have a lightmap
-// TODO do this in a less hacky way, maybe make it configurable
-THREE.ShaderChunk.lights_fragment_maps = THREE.ShaderChunk.lights_fragment_maps.replace(
-  "iblIrradiance += getLightProbeIndirectIrradiance( geometry, maxMipLevel );",
-  `#ifndef USE_LIGHTMAP
-     iblIrradiance += getLightProbeIndirectIrradiance( geometry, maxMipLevel );
-   #endif`
-);
+import { LUTCubeLoader } from "three/examples/jsm/loaders/LUTCubeLoader";
+import blenderLutPath from "../assets/blender-lut.cube";
 
 const toneMappingOptions = {
   None: "NoToneMapping",
   Linear: "LinearToneMapping",
   Reinhard: "ReinhardToneMapping",
   Cineon: "CineonToneMapping",
-  ACESFilmic: "ACESFilmicToneMapping"
+  ACESFilmic: "ACESFilmicToneMapping",
+  CustomToneMapping: "CustomToneMapping",
+  LUTToneMapping: "LUTToneMapping"
+};
+
+const outputEncodingOptions = {
+  LinearEncoding: "LinearEncoding",
+  sRGBEncoding: "sRGBEncoding",
+  GammaEncoding: "GammaEncoding",
+  GBEEncoding: "GBEEncoding",
+  LogLuvEncoding: "LogLuvEncoding",
+  GBM7Encoding: "GBM7Encoding",
+  RGBM16Encoding: "RGBM16Encoding",
+  GBDEncoding: "GBDEncoding",
+  BasicDepthPacking: "BasicDepthPacking",
+  GBADepthPacking: "GBADepthPackig"
 };
 
 const defaultEnvSettings = {
   toneMapping: toneMappingOptions.Linear,
+  outputEncoding: outputEncodingOptions.sRGBEncoding,
   toneMappingExposure: 1,
   physicallyCorrectLights: true,
   envMapTexture: null,
   backgroundTexture: null,
   backgroundColor: new THREE.Color("#000000")
 };
+
+let blenderLUTPromise; // lazy loaded
 
 export class EnvironmentSystem {
   constructor(sceneEl) {
@@ -58,6 +70,10 @@ export class EnvironmentSystem {
       .onChange(updateDebug)
       .listen();
     gui
+      .add(debugSettings, "outputEncoding", Object.values(outputEncodingOptions))
+      .onChange(updateDebug)
+      .listen();
+    gui
       .add(debugSettings, "physicallyCorrectLights", true)
       .onChange(updateDebug)
       .listen();
@@ -73,6 +89,8 @@ export class EnvironmentSystem {
   updateEnvironment(envEl) {
     const envSettingsEl = envEl.querySelector("[environment-settings]");
     const skyboxEl = envEl.querySelector("[skybox]");
+    const navmeshEl = envEl.querySelector("[nav-mesh]");
+
     const envSettings = {
       ...defaultEnvSettings,
       skybox: skyboxEl?.components["skybox"]
@@ -81,6 +99,18 @@ export class EnvironmentSystem {
     if (envSettingsEl) {
       Object.assign(envSettings, envSettingsEl.components["environment-settings"].data);
     }
+
+    const navMesh = navmeshEl?.object3D.getObjectByProperty("isMesh", true);
+    if (navMesh) {
+      AFRAME.scenes[0].systems.nav.loadMesh(navMesh, navmeshEl.components["nav-mesh"].data.zone);
+    }
+
+    // TODO animated objects should not be static
+    envEl.object3D.traverse(o => {
+      if (o.isMesh) {
+        o.reflectionProbeMode = "static";
+      }
+    });
 
     this.applyEnvSettings(envSettings);
   }
@@ -103,9 +133,35 @@ export class EnvironmentSystem {
     if (this.renderer.toneMapping !== newToneMapping) {
       this.renderer.toneMapping = newToneMapping;
       materialsNeedUpdate = true;
+
+      // TODO clean up async behavior
+      if (newToneMapping === THREE.LUTToneMapping) {
+        if (!blenderLUTPromise) {
+          blenderLUTPromise = new Promise(function(resolve, reject) {
+            new LUTCubeLoader().load(blenderLutPath, ({ texture3D }) => resolve(texture3D), null, reject);
+          });
+        }
+
+        blenderLUTPromise
+          .then(t => {
+            this.renderer.tonemappingLUT = t;
+          })
+          .catch(function(e) {
+            console.error("Error loading Blender LUT", e);
+            blenderLUTPromise = null;
+          });
+      } else {
+        this.renderer.tonemappingLUT = null;
+      }
     }
 
     this.renderer.toneMappingExposure = settings.toneMappingExposure;
+
+    const newOutputEncoding = THREE[settings.outputEncoding];
+    if (this.renderer.outputEncoding !== newOutputEncoding) {
+      this.renderer.outputEncoding = newOutputEncoding;
+      materialsNeedUpdate = true;
+    }
 
     this.scene.remove(window.lp);
 
@@ -123,7 +179,8 @@ export class EnvironmentSystem {
         // TODO PMREMGenerator should be fixed to not assume this
         settings.envMapTexture.flipY = true;
         // Assume texture is always an equirect for now
-        this.scene.environment = this.pmremGenerator.fromEquirectangular(settings.envMapTexture).texture;
+        settings.envMapTexture.mapping = THREE.EquirectangularReflectionMapping;
+        this.scene.environment = settings.envMapTexture;
       }
     } else if (settings.skybox) {
       if (this.prevEnvMapTextureUUID !== settings.skybox.uuid) {
@@ -144,10 +201,44 @@ export class EnvironmentSystem {
   }
 }
 
+AFRAME.registerComponent("nav-mesh", {
+  schema: {
+    zone: { default: "character" }
+  }
+});
+
 AFRAME.registerComponent("environment-settings", {
   schema: {
     toneMapping: { default: defaultEnvSettings.toneMapping, oneOf: Object.values(toneMappingOptions) },
     toneMappingExposure: { default: defaultEnvSettings.toneMappingExposure },
     backgroundColor: { type: "color", default: defaultEnvSettings.background }
+  }
+});
+
+AFRAME.registerComponent("reflection-probe", {
+  schema: {
+    size: { default: 1 },
+    envMapTexture: { type: "map" }
+  },
+
+  init: function() {
+    this.el.object3D.updateMatrices();
+
+    const box = new THREE.Box3()
+      .setFromCenterAndSize(new THREE.Vector3(), new THREE.Vector3().setScalar(this.data.size * 2))
+      .applyMatrix4(this.el.object3D.matrixWorld);
+
+    this.el.setObject3D("probe", new THREE.ReflectionProbe(box, this.data.envMapTexture));
+
+    if (this.el.sceneEl.systems["hubs-systems"].environmentSystem.debugMode) {
+      const debugBox = new THREE.Box3().setFromCenterAndSize(
+        new THREE.Vector3(),
+        new THREE.Vector3().setScalar(this.data.size * 2)
+      );
+      this.el.setObject3D(
+        "helper",
+        new THREE.Box3Helper(debugBox, new THREE.Color(Math.random(), Math.random(), Math.random()))
+      );
+    }
   }
 });

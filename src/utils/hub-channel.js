@@ -213,6 +213,22 @@ export default class HubChannel extends EventTarget {
     this.channel.push("events:end_recording", {});
   }
 
+  raiseHand() {
+    this.channel.push("events:raise_hand", {});
+  }
+
+  lowerHand() {
+    this.channel.push("events:lower_hand", {});
+  }
+
+  beginTyping() {
+    this.channel.push("events:begin_typing", {});
+  }
+
+  endTyping() {
+    this.channel.push("events:end_typing", {});
+  }
+
   getEntryTimingFlags = () => {
     const entryTimingFlags = { isNewDaily: true, isNewMonthly: true, isNewDayWindow: true, isNewMonthWindow: true };
     const storedLastEnteredAt = this.store.state.activity.lastEnteredAt;
@@ -360,7 +376,7 @@ export default class HubChannel extends EventTarget {
         .receive("ok", res => {
           resolve(res.oauth_url);
         })
-        .receive("error", reject);
+        .receive("error", err => reject(new Error(err.reason)));
     });
   };
 
